@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import asyncio, aiohttp, requests, ssl, time, json, logging, datetime, pandas as pd, threading
+import os
 from flask import Flask, jsonify
 
 # ------------------ Global Timing Data ------------------
@@ -20,8 +21,8 @@ HEADERS = {
     "Content-Type": "application/json",
 }
 
-# Set this to your Render server’s endpoint that will accept the Excel file.
-RENDER_EXPORT_URL = "https://your-render-server-url/upload"  # Modify accordingly
+# Endpoint to which the PDF report should be sent
+PDF_RENDER_EXPORT_URL = "https://flask-outage-app:8080/upload"  # MODIFY accordingly
 
 logging.basicConfig(
     filename="server_check.log",
@@ -133,7 +134,7 @@ async def check_server_async(server, session, node_map, pause_event=None):
         ssl_valid = False
     return (server_uuid, node_name, server_name, is_up, mail_up, ssl_valid)
 
-# ------------------ Synchronous Functions ------------------
+# ------------------ Synchronous Functions for Server Check ------------------
 def get_all_servers():
     logging.info("Fetching full server list from API...")
     servers = []
@@ -228,18 +229,210 @@ def export_results_to_excel(server_status):
         logging.exception("Error exporting to Excel")
         return None
 
-def export_file_to_remote(filename):
+# ------------------ Analyzer Functions ------------------
+def analyze_excel_and_generate_pdf(excel_filename):
+    """
+    Loads the Excel file produced by the server check,
+    computes statistics and generates charts,
+    then builds a PDF report (using ReportLab) and returns its filename.
+    """
     try:
-        with open(filename, 'rb') as f:
-            files = {'file': (filename, f, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')}
-            response = requests.post(RENDER_EXPORT_URL, files=files)
-            if response.status_code == 200:
-                logging.info(f"File {filename} successfully uploaded to remote server.")
-            else:
-                logging.error(f"Failed to upload file {filename} to remote server. Status: {response.status_code}")
+        df = pd.read_excel(excel_filename)
     except Exception as e:
-        logging.exception("Error exporting file to remote server.")
+        logging.exception("Error reading Excel file: " + str(e))
+        return None
 
+    # Ensure required columns exist
+    for col in ["Node Name", "Web Status", "Mail Status", "SSL"]:
+        if col not in df.columns:
+            logging.error(f"Missing required column: {col}")
+            return None
+
+    # Get the "Checked At" value if present
+    checked_at = None
+    if "Checked At" in df.columns:
+        try:
+            checked_at = pd.to_datetime(df["Checked At"].iloc[0])
+        except Exception:
+            checked_at = None
+
+    # Overall stats
+    total_servers = len(df)
+    web_up = (df["Web Status"].str.upper() == "UP").sum()
+    web_down = (df["Web Status"].str.upper() == "DOWN").sum()
+    mail_up = (df["Mail Status"].str.upper() == "UP").sum()
+    mail_down = (df["Mail Status"].str.upper() == "DOWN").sum()
+    ssl_yes = (df["SSL"].str.upper() == "YES").sum()
+    ssl_no = (df["SSL"].str.upper() == "NO").sum()
+
+    # Group by "Node Name" for breakdown
+    node_group = df.groupby("Node Name").agg(
+        Web_Up=('Web Status', lambda x: (x.str.upper() == "UP").sum()),
+        Web_Down=('Web Status', lambda x: (x.str.upper() == "DOWN").sum()),
+        Mail_Up=('Mail Status', lambda x: (x.str.upper() == "UP").sum()),
+        Mail_Down=('Mail Status', lambda x: (x.str.upper() == "DOWN").sum()),
+        SSL_Yes=('SSL', lambda x: (x.str.upper() == "YES").sum()),
+        SSL_No=('SSL', lambda x: (x.str.upper() == "NO").sum())
+    ).reset_index()
+    node_group.columns = [col.replace("_", " ") for col in node_group.columns]
+
+    if not node_group.empty:
+        most_problematic_node = node_group.loc[node_group['Web Down'].idxmax(), "Node Name"]
+        most_stable_node = node_group.loc[node_group['Web Up'].idxmax(), "Node Name"]
+    else:
+        most_problematic_node = "N/A"
+        most_stable_node = "N/A"
+
+    summary_text = (
+        f"Total Servers: {total_servers}\n"
+        f"Web Up: {web_up}\n"
+        f"Web Down: {web_down}\n"
+        f"Mail Up: {mail_up}\n"
+        f"Mail Down: {mail_down}\n"
+        f"SSL Enabled: {ssl_yes}\n"
+        f"SSL Disabled: {ssl_no}\n"
+        f"Most Problematic Node: {most_problematic_node}\n"
+        f"Most Stable Node: {most_stable_node}"
+    )
+
+    # Compute extra percentages
+    web_up_pct = (web_up / (web_up + web_down) * 100) if (web_up + web_down) > 0 else 0
+    web_down_pct = (web_down / (web_up + web_down) * 100) if (web_up + web_down) > 0 else 0
+    mail_up_pct = (mail_up / (mail_up + mail_down) * 100) if (mail_up + mail_down) > 0 else 0
+    mail_down_pct = (mail_down / (mail_up + mail_down) * 100) if (mail_up + mail_down) > 0 else 0
+    ssl_yes_pct = (ssl_yes / (ssl_yes + ssl_no) * 100) if (ssl_yes + ssl_no) > 0 else 0
+    ssl_no_pct = (ssl_no / (ssl_yes + ssl_no) * 100) if (ssl_yes + ssl_no) > 0 else 0
+
+    extra_stats_text = (
+        f"Web Server Stats:\nUp: {web_up} ({web_up_pct:.1f}%)\nDown: {web_down} ({web_down_pct:.1f}%)\n\n"
+        f"Mail Server Stats:\nUp: {mail_up} ({mail_up_pct:.1f}%)\nDown: {mail_down} ({mail_down_pct:.1f}%)\n\n"
+        f"SSL Server Stats:\nEnabled: {ssl_yes} ({ssl_yes_pct:.1f}%)\nDisabled: {ssl_no} ({ssl_no_pct:.1f}%)"
+    )
+
+    # Generate charts in headless mode
+    import matplotlib.pyplot as plt
+    plt.style.use('dark_background')
+
+    # Bar Chart
+    plt.figure(figsize=(14, 7))
+    index = range(len(node_group))
+    bar_width = 0.35
+    bars_web = plt.bar([i - bar_width/2 for i in index], node_group["Web Down"], bar_width, label='Web Down', color='#F44336')
+    bars_mail = plt.bar([i + bar_width/2 for i in index], node_group["Mail Down"], bar_width, label='Mail Down', color='#FF9800')
+    for bar in bars_web:
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f'{int(bar.get_height())}',
+                 ha='center', va='bottom', fontsize=10, color='white')
+    for bar in bars_mail:
+        plt.text(bar.get_x() + bar.get_width()/2, bar.get_height(), f'{int(bar.get_height())}',
+                 ha='center', va='bottom', fontsize=10, color='white')
+    plt.xlabel("Node Name", fontsize=12, color='white')
+    plt.ylabel("Count Down", fontsize=12, color='white')
+    plt.title("Number of Web and Mail Servers Down per Node", fontsize=14, color='white')
+    plt.xticks(index, node_group["Node Name"], rotation=45, fontsize=10, color='white')
+    plt.legend()
+    plt.tight_layout()
+    bar_chart_path = "node_status.png"
+    plt.savefig(bar_chart_path)
+    plt.close()
+
+    # Pie Charts
+    fig, axs = plt.subplots(1, 3, figsize=(21, 7))
+    plt.subplots_adjust(wspace=0.4, left=0.1, right=0.9, top=0.95, bottom=0.1)
+    # Web status
+    axs[0].pie([web_up, web_down], labels=['Up', 'Down'], autopct='%1.1f%%', startangle=90,
+               colors=['#8BC34A', '#F44336'], shadow=True)
+    axs[0].set_title("Web Server Status", fontsize=12, pad=20, color='white')
+    # Mail status
+    axs[1].pie([mail_up, mail_down], labels=['Up', 'Down'], autopct='%1.1f%%', startangle=90,
+               colors=['#8BC34A', '#F44336'], shadow=True)
+    axs[1].set_title("Mail Server Status", fontsize=12, pad=20, color='white')
+    # SSL status
+    axs[2].pie([ssl_yes, ssl_no], labels=['Enabled', 'Disabled'], autopct='%1.1f%%', startangle=90,
+               colors=['#8BC34A', '#F44336'], shadow=True)
+    axs[2].set_title("SSL Status", fontsize=12, pad=20, color='white')
+    pie_chart_path = "status_pie.png"
+    plt.savefig(pie_chart_path)
+    plt.close()
+
+    # Build PDF report using ReportLab
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, LongTable, Table, TableStyle, KeepTogether
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib import colors
+
+    try:
+        dt = datetime.datetime.now()
+        if checked_at:
+            pdf_filename = checked_at.strftime("%B_%d_%Y_%I-%M-%S_%p.pdf")
+        else:
+            pdf_filename = f"server_stats_{dt.strftime('%Y%m%d_%H%M%S')}.pdf"
+        doc = SimpleDocTemplate(pdf_filename, pagesize=letter)
+        styles = getSampleStyleSheet()
+        flowables = []
+        flowables.append(Paragraph("Stat Compiler v2 Report", styles["Title"]))
+        flowables.append(Spacer(1, 24))
+        if checked_at:
+            date_str = checked_at.strftime("%B %d, %Y %I:%M %p")
+            flowables.append(Paragraph(f"<b>Checked At:</b> {date_str}", styles["Heading2"]))
+            flowables.append(Spacer(1, 12))
+        summary_para = Paragraph(f"<b>Overall Summary:</b><br/>{summary_text.replace('\n','<br/>')}", styles["BodyText"])
+        additional_para = Paragraph(f"<b>Additional Info:</b><br/>{extra_stats_text.replace('\n','<br/>')}", styles["BodyText"])
+        summary_table_data = [[summary_para, additional_para]]
+        summary_table = Table(summary_table_data, colWidths=[doc.width/2.0, doc.width/2.0])
+        summary_table.setStyle(TableStyle([
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('INNERGRID', (0,0), (-1,-1), 0.25, colors.black),
+            ('BOX', (0,0), (-1,-1), 0.25, colors.black),
+        ]))
+        flowables.append(summary_table)
+        flowables.append(Spacer(1, 12))
+        # Convert node_group to table data
+        data = [node_group.columns.tolist()] + node_group.values.tolist()
+        node_table = LongTable(data, repeatRows=1)
+        node_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ]))
+        flowables.append(node_table)
+        flowables.append(Spacer(1, 24))
+        if os.path.exists(bar_chart_path):
+            flowables.append(Paragraph("<b>Bar Chart: Number of Web and Mail Servers Down per Node</b>", styles["BodyText"]))
+            flowables.append(Spacer(1, 12))
+            flowables.append(RLImage(bar_chart_path, width=400, height=300))
+            flowables.append(Spacer(1, 24))
+        if os.path.exists(pie_chart_path):
+            pie_chart_flowable = KeepTogether([
+                Paragraph("<b>Pie Charts: Server Status</b>", styles["BodyText"]),
+                Spacer(1, 12),
+                RLImage(pie_chart_path, width=400, height=133),
+                Spacer(1, 24)
+            ])
+            flowables.append(pie_chart_flowable)
+        doc.build(flowables)
+    except Exception as e:
+        logging.exception("Error generating PDF: " + str(e))
+        return None
+
+    return pdf_filename
+
+def export_pdf_file_to_remote(pdf_filename):
+    try:
+        with open(pdf_filename, 'rb') as f:
+            files = {'file': (pdf_filename, f, 'application/pdf')}
+            response = requests.post(PDF_RENDER_EXPORT_URL, files=files)
+            if response.status_code == 200:
+                logging.info(f"PDF file {pdf_filename} successfully uploaded to remote server.")
+            else:
+                logging.error(f"Failed to upload PDF file {pdf_filename} to remote server. Status: {response.status_code}")
+    except Exception as e:
+        logging.exception("Error exporting PDF file to remote server.")
+
+# ------------------ Main Server Check Routine ------------------
 def run_server_check():
     logging.info("Starting server check.")
     node_map = get_all_nodes()
@@ -261,17 +454,20 @@ def run_server_check():
             "mail_up": mail_up,
             "ssl_valid": ssl_valid
         }
-    filename = export_results_to_excel(server_status)
-    if filename:
-        export_file_to_remote(filename)
-    return server_status, filename
+    excel_filename = export_results_to_excel(server_status)
+    if excel_filename:
+        # Analyze the Excel file to generate a PDF report and upload that PDF
+        pdf_filename = analyze_excel_and_generate_pdf(excel_filename)
+        if pdf_filename:
+            export_pdf_file_to_remote(pdf_filename)
+    return server_status, excel_filename
 
 # ------------------ Flask Application ------------------
 app = Flask(__name__)
 check_status = {
     "running": False,
     "result": None,
-    "filename": None,
+    "excel_file": None,
     "message": ""
 }
 
@@ -279,9 +475,9 @@ def background_check():
     check_status["running"] = True
     check_status["message"] = "Server check in progress..."
     try:
-        result, filename = run_server_check()
+        result, excel_file = run_server_check()
         check_status["result"] = result
-        check_status["filename"] = filename
+        check_status["excel_file"] = excel_file
         check_status["message"] = "Server check completed."
     except Exception as e:
         check_status["message"] = f"Error during server check: {e}"
