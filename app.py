@@ -19,7 +19,7 @@ mail_check_timings = []
 # ------------------ Configuration & Constants ------------------
 PANEL_URL = "https://panel.businessidentity.llc"
 API_KEY = "ptla_XjxL979xLjfkJ6mGhkukaNQu9qeCTg3YiE4uFrBOUpP"
-REQUEST_TIMEOUT = (3, 3)
+REQUEST_TIMEOUT = (10, 10)
 ASYNC_TOTAL_TIMEOUT = 10
 CONCURRENCY_LIMIT = 40
 
