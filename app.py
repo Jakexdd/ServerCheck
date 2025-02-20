@@ -377,7 +377,8 @@ def analyze_excel_and_generate_pdf(excel_filename):
             flowables.append(Spacer(1, 12))
         summary_html = summary_text.replace('\n', '<br/>')
         summary_para = Paragraph(f"<b>Overall Summary:</b><br/>{summary_html}", styles["BodyText"])
-        additional_para = Paragraph(f"<b>Additional Info:</b><br/>{extra_stats_text.replace('\n','<br/>')}", styles["BodyText"])
+        extra_html = extra_stats_text.replace('\n', '<br/>')
+        additional_para = Paragraph(f"<b>Additional Info:</b><br/>{extra_html}", styles["BodyText"])
         summary_table_data = [[summary_para, additional_para]]
         summary_table = Table(summary_table_data, colWidths=[doc.width/2.0, doc.width/2.0])
         summary_table.setStyle(TableStyle([
