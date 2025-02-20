@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
-import asyncio, aiohttp, requests, ssl, time, json, logging, datetime, pandas as pd, threading
 import os
+import sys
+import asyncio, aiohttp, requests, ssl, time, json, logging, datetime, pandas as pd, threading
+
+# Monkey-patch Werkzeug's url_quote if it doesn't exist
+import werkzeug.urls
+if not hasattr(werkzeug.urls, "url_quote"):
+    from urllib.parse import quote
+    werkzeug.urls.url_quote = quote
+
 from flask import Flask, jsonify
 
 # ------------------ Global Timing Data ------------------
