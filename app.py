@@ -481,6 +481,19 @@ check_status = {
     "message": ""
 }
 
+@app.before_first_request
+def start_background_check():
+    thread = threading.Thread(target=background_check)
+    thread.start()
+
+@app.route("/")
+def index():
+    return "Server Check Flask App is running. Visit /status to view the current status."
+
+@app.route("/status")
+def status():
+    return jsonify(check_status)
+
 def background_check():
     check_status["running"] = True
     check_status["message"] = "Server check in progress..."
@@ -494,19 +507,6 @@ def background_check():
         logging.exception("Error in background server check")
     finally:
         check_status["running"] = False
-
-@app.before_serving
-def start_background_check():
-    thread = threading.Thread(target=background_check)
-    thread.start()
-
-@app.route("/")
-def index():
-    return "Server Check Flask App is running. Visit /status to view the current status."
-
-@app.route("/status")
-def status():
-    return jsonify(check_status)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
