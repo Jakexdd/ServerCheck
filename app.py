@@ -375,7 +375,8 @@ def analyze_excel_and_generate_pdf(excel_filename):
             date_str = checked_at.strftime("%B %d, %Y %I:%M %p")
             flowables.append(Paragraph(f"<b>Checked At:</b> {date_str}", styles["Heading2"]))
             flowables.append(Spacer(1, 12))
-        summary_para = Paragraph(f"<b>Overall Summary:</b><br/>{summary_text.replace('\n','<br/>')}", styles["BodyText"])
+        summary_html = summary_text.replace('\n', '<br/>')
+        summary_para = Paragraph(f"<b>Overall Summary:</b><br/>{summary_html}", styles["BodyText"])
         additional_para = Paragraph(f"<b>Additional Info:</b><br/>{extra_stats_text.replace('\n','<br/>')}", styles["BodyText"])
         summary_table_data = [[summary_para, additional_para]]
         summary_table = Table(summary_table_data, colWidths=[doc.width/2.0, doc.width/2.0])
