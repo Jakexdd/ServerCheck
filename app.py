@@ -3,7 +3,7 @@ import os
 import sys
 import asyncio, aiohttp, requests, ssl, time, json, logging, datetime, pandas as pd, threading
 
-# Monkey-patch Werkzeug's url_quote if it doesn't exist
+# Monkey-patch Werkzeug's url_quote if it's missing
 import werkzeug.urls
 if not hasattr(werkzeug.urls, "url_quote"):
     from urllib.parse import quote
@@ -495,10 +495,12 @@ def background_check():
     finally:
         check_status["running"] = False
 
-@app.before_first_request
 def start_background_check():
     thread = threading.Thread(target=background_check)
     thread.start()
+
+# Instead of using the decorator, append the function manually.
+app.before_first_request_funcs.append(start_background_check)
 
 @app.route("/")
 def index():
