@@ -357,7 +357,7 @@ def analyze_excel_and_generate_pdf(excel_filename):
     # SSL status
     axs[2].pie([ssl_yes, ssl_no], labels=['Enabled', 'Disabled'], autopct='%1.1f%%', startangle=90,
                colors=['#8BC34A', '#F44336'], shadow=True)
-    axs[2].set_title("SSL Status", fontsize=12, pad=20, color='white')
+    axs[2].set_title("SSL Server Status", fontsize=12, pad=20, color='white')
     pie_chart_path = "status_pie.png"
     plt.savefig(pie_chart_path)
     plt.close()
@@ -495,12 +495,10 @@ def background_check():
     finally:
         check_status["running"] = False
 
+@app.before_serving
 def start_background_check():
     thread = threading.Thread(target=background_check)
     thread.start()
-
-# Instead of using the decorator, append the function manually.
-app.before_first_request_funcs.append(start_background_check)
 
 @app.route("/")
 def index():
