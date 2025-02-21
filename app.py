@@ -17,9 +17,9 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 # ------------------ Configuration ------------------
 PANEL_URL = "https://panel.businessidentity.llc"
 API_KEY = "ptla_XjxL979xLjfkJ6mGhkukaNQu9qeCTg3YiE4uFrBOUpP"
-REQUEST_TIMEOUT = (5, 5)  # in seconds
+REQUEST_TIMEOUT = (7, 7)  # in seconds
 CONCURRENCY_LIMIT = 50      # Increase concurrency if resources allow
-BATCH_SIZE = 100            # Process servers in batches of 100
+BATCH_SIZE = 1000            # Process servers in batches of 100
 PDF_RENDER_EXPORT_URL = "http://flask-outage-app:8080/upload"  # Use HTTP for internal service
 
 # ------------------ Logging Setup ------------------
@@ -37,7 +37,7 @@ HEADERS = {
 
 # ------------------ Async Functions ------------------
 
-async def async_check_ssl_handshake(hostname, timeout=20):
+async def async_check_ssl_handshake(hostname, timeout=7):
     """Check SSL handshake status."""
     try:
         ssl_context = ssl.create_default_context()
