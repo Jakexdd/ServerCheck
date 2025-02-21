@@ -14,8 +14,9 @@ import gc
 PANEL_URL = "https://panel.businessidentity.llc"
 API_KEY = "ptla_XjxL979xLjfkJ6mGhkukaNQu9qeCTg3YiE4uFrBOUpP"
 REQUEST_TIMEOUT = (10, 10)
-CONCURRENCY_LIMIT = 30  # Optimized for 512MB memory
-BATCH_SIZE = 100  # Process servers in batches of 100
+CONCURRENCY_LIMIT = 20   # Lower concurrency for 512 MB
+BATCH_SIZE = 100         # Process servers in batches of 100
+# Use HTTP for internal service if SSL is not set up
 PDF_RENDER_EXPORT_URL = "http://flask-outage-app:8080/upload"
 
 # ------------------ Logging Setup ------------------
@@ -32,6 +33,7 @@ HEADERS = {
 }
 
 # ------------------ Async Server Checks ------------------
+
 async def async_check_ssl_handshake(hostname, timeout=20):
     """Check SSL handshake status."""
     try:
@@ -57,11 +59,11 @@ async def async_get_with_retries(url, session, retries=5, delay=2):
                 if 200 <= resp.status < 400:
                     return resp.status
                 else:
-                    logging.warning(f"Received status {resp.status} for {url}")
+                    logging.warning(f"Attempt {attempt+1}: {url} returned status {resp.status}")
         except asyncio.TimeoutError:
             logging.warning(f"Timeout on attempt {attempt+1} for {url}")
         except Exception as e:
-            logging.warning(f"Retry {attempt+1} failed for {url}: {e}")
+            logging.warning(f"Attempt {attempt+1}: Error fetching {url}: {e}")
         await asyncio.sleep(delay)
     logging.error(f"All retries failed for {url}")
     return None
@@ -89,6 +91,7 @@ async def check_server_async(server, session, node_map):
     return (server_name, node_name, bool(web_status), bool(mail_status), ssl_status)
 
 # ------------------ API Fetching ------------------
+
 def get_all_nodes():
     """Get all nodes from the API."""
     logging.info("Fetching nodes from API...")
@@ -124,31 +127,10 @@ def get_all_servers():
             break
     return servers
 
-# ------------------ Report Generation ------------------
-def generate_report(results):
-    """Generate a report and save it as an Excel file."""
-    now = datetime.datetime.now()
-    filename = f"server_status_{now.strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
-    df = pd.DataFrame(results, columns=["Server Name", "Node Name", "Web Status", "Mail Status", "SSL Valid"])
-    df.to_excel(filename, index=False)
-    logging.info(f"Report saved to {filename}")
-    return filename
-
-def upload_report_to_pdf_service(excel_file):
-    """Upload the Excel report to the PDF processing service."""
-    try:
-        with open(excel_file, 'rb') as f:
-            response = requests.post(PDF_RENDER_EXPORT_URL, files={'file': f})
-        if response.status_code == 200:
-            logging.info("Report successfully uploaded to the PDF service.")
-        else:
-            logging.error(f"Failed to upload report. Status: {response.status_code}")
-    except Exception as e:
-        logging.error(f"Failed to upload report: {e}")
-
 # ------------------ Batch Processing ------------------
+
 def batch_servers(servers, batch_size=BATCH_SIZE):
-    """Yield successive batches from a list of servers."""
+    """Yield successive batches from the servers list."""
     for i in range(0, len(servers), batch_size):
         yield servers[i:i + batch_size]
 
@@ -157,7 +139,6 @@ async def process_server_batch(servers, node_map):
     results = []
     connector = aiohttp.TCPConnector(limit=CONCURRENCY_LIMIT)
     timeout = aiohttp.ClientTimeout(total=30)
-
     async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
         tasks = [check_server_async(server, session, node_map) for server in servers]
         for future in asyncio.as_completed(tasks):
@@ -165,46 +146,125 @@ async def process_server_batch(servers, node_map):
             results.append(result)
     return results
 
+# ------------------ Report Generation ------------------
+
+def generate_report(results):
+    """Generate an Excel report from results."""
+    now = datetime.datetime.now()
+    filename = f"server_status_{now.strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
+    df = pd.DataFrame(results, columns=["Server Name", "Node Name", "Web Status", "Mail Status", "SSL Valid"])
+    df.to_excel(filename, index=False)
+    logging.info(f"Excel report saved to {filename}")
+    return filename
+
+def analyze_excel_and_generate_pdf(excel_filename):
+    """Convert the Excel report into a PDF report using ReportLab."""
+    try:
+        df = pd.read_excel(excel_filename)
+    except Exception as e:
+        logging.error(f"Error reading Excel file: {e}")
+        return None
+
+    # Ensure required columns exist
+    for col in ["Server Name", "Node Name", "Web Status", "Mail Status", "SSL Valid"]:
+        if col not in df.columns:
+            logging.error(f"Missing required column in report: {col}")
+            return None
+
+    # Create a simple PDF report using ReportLab
+    from reportlab.lib.pagesizes import letter
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib import colors
+
+    now = datetime.datetime.now()
+    pdf_filename = f"server_status_{now.strftime('%Y-%m-%d_%H-%M-%S')}.pdf"
+    doc = SimpleDocTemplate(pdf_filename, pagesize=letter)
+    styles = getSampleStyleSheet()
+    flowables = []
+
+    # Title
+    flowables.append(Paragraph("Server Check Report", styles["Title"]))
+    flowables.append(Spacer(1, 24))
+
+    # Summary
+    summary_text = f"Report generated on {now.strftime('%Y-%m-%d %H:%M:%S')}"
+    flowables.append(Paragraph(summary_text, styles["Normal"]))
+    flowables.append(Spacer(1, 12))
+
+    # Table data from DataFrame
+    data = [df.columns.tolist()] + df.values.tolist()
+    table = Table(data)
+    table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+    ]))
+    flowables.append(table)
+
+    try:
+        doc.build(flowables)
+        logging.info(f"PDF report generated: {pdf_filename}")
+        return pdf_filename
+    except Exception as e:
+        logging.error(f"Error generating PDF: {e}")
+        return None
+
+def upload_report_to_pdf_service(pdf_filename):
+    """Upload the PDF report to the PDF processing service."""
+    try:
+        with open(pdf_filename, 'rb') as f:
+            files = {
+                'file': (os.path.basename(pdf_filename), f, 'application/pdf')
+            }
+            response = requests.post(PDF_RENDER_EXPORT_URL, files=files)
+        if response.status_code == 200:
+            logging.info(f"PDF file {pdf_filename} successfully uploaded.")
+        else:
+            logging.error(f"Failed to upload PDF file {pdf_filename}. Status: {response.status_code}, Response: {response.text}")
+    except Exception as e:
+        logging.error(f"Error uploading PDF file: {e}")
+
 # ------------------ Main Task Runner ------------------
+
 async def run_server_check():
     """Main server check task with batch processing."""
     logging.info("Starting full server check...")
     node_map = get_all_nodes()
     servers = get_all_servers()
-
     all_results = []
-    for batch_num, server_batch in enumerate(batch_servers(servers), start=1):
+    total_servers = len(servers)
+    logging.info(f"Total servers fetched: {total_servers}")
+
+    batch_num = 1
+    for server_batch in batch_servers(servers, BATCH_SIZE):
         logging.info(f"Processing batch {batch_num} with {len(server_batch)} servers...")
         batch_results = await process_server_batch(server_batch, node_map)
         all_results.extend(batch_results)
-
-        # Clean up memory after each batch
+        batch_num += 1
         gc.collect()
 
-    report_file = generate_report(all_results)
-    upload_report_to_pdf_service(report_file)
+    excel_file = generate_report(all_results)
+    if excel_file:
+        pdf_file = analyze_excel_and_generate_pdf(excel_file)
+        if pdf_file:
+            upload_report_to_pdf_service(pdf_file)
     logging.info("Server check completed successfully.")
 
-# ------------------ Scheduler ------------------
+# ------------------ Scheduler Setup ------------------
+
 scheduler = BlockingScheduler()
 
-# Schedule the task to run daily at 7:30 AM PST (15:30 UTC)
+# Schedule the job to run daily at 7:30 AM PST (which is 15:30 UTC)
 scheduler.add_job(lambda: asyncio.run(run_server_check()), 'cron', hour=15, minute=30, timezone='UTC')
 
 # ------------------ Entry Point ------------------
+
 if __name__ == "__main__":
-    logging.info("Starting background worker...")
-
-    # Run the check once on deployment
+    logging.info("Starting background worker; running server check once immediately...")
     asyncio.run(run_server_check())
-
-    # Schedule daily job at 7:30 AM PST
-    scheduler.add_job(
-        lambda: asyncio.run(run_server_check()),
-        trigger="cron",
-        hour=7,
-        minute=30,
-        timezone="US/Pacific"
-    )
-
+    logging.info("Scheduling daily server check at 7:30 AM PST...")
     scheduler.start()
