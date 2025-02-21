@@ -14,9 +14,9 @@ import gc
 PANEL_URL = "https://panel.businessidentity.llc"
 API_KEY = "ptla_XjxL979xLjfkJ6mGhkukaNQu9qeCTg3YiE4uFrBOUpP"
 REQUEST_TIMEOUT = (10, 10)
-CONCURRENCY_LIMIT = 10  # Optimized for 512MB memory
+CONCURRENCY_LIMIT = 30  # Optimized for 512MB memory
 BATCH_SIZE = 100  # Process servers in batches of 100
-PDF_RENDER_EXPORT_URL = "https://flask-outage-app:8080/upload"
+PDF_RENDER_EXPORT_URL = "http://flask-outage-app:8080/upload"
 
 # ------------------ Logging Setup ------------------
 logging.basicConfig(
