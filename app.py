@@ -31,7 +31,7 @@ HEADERS = {
 }
 
 # ------------------ Async Server Checks ------------------
-async def async_check_ssl_handshake(hostname, timeout=10):
+async def async_check_ssl_handshake(hostname, timeout=20):
     """Check SSL handshake status."""
     try:
         ssl_context = ssl.create_default_context()
@@ -42,20 +42,27 @@ async def async_check_ssl_handshake(hostname, timeout=10):
         writer.close()
         await writer.wait_closed()
         return True
+    except asyncio.TimeoutError:
+        logging.error(f"SSL handshake timed out for {hostname}")
     except Exception as e:
         logging.error(f"SSL handshake failed for {hostname}: {e}")
-        return False
+    return False
 
-async def async_get_with_retries(url, session, retries=3, delay=1):
+async def async_get_with_retries(url, session, retries=5, delay=2):
     """Perform GET request with retries."""
     for attempt in range(retries):
         try:
             async with session.get(url, ssl=False) as resp:
                 if 200 <= resp.status < 400:
                     return resp.status
+                else:
+                    logging.warning(f"Received status {resp.status} for {url}")
+        except asyncio.TimeoutError:
+            logging.warning(f"Timeout on attempt {attempt+1} for {url}")
         except Exception as e:
             logging.warning(f"Retry {attempt+1} failed for {url}: {e}")
         await asyncio.sleep(delay)
+    logging.error(f"All retries failed for {url}")
     return None
 
 async def check_server_async(server, session, node_map):
