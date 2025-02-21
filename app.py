@@ -8,6 +8,7 @@ import aiohttp
 import ssl
 import os
 import time
+import asyncio
 
 # ------------------ Configuration ------------------
 PANEL_URL = "https://panel.businessidentity.llc"
@@ -165,7 +166,22 @@ scheduler = BlockingScheduler()
 scheduler.add_job(lambda: asyncio.run(run_server_check()), 'cron', hour=15, minute=30, timezone='UTC')
 
 # ------------------ Entry Point ------------------
+import asyncio
+
+# ✅ Corrected main execution block for async execution
 if __name__ == "__main__":
-    logging.info("Background worker started, waiting for scheduled runs...")
-    run_server_check()  # Run once immediately on deployment
+    logging.info("Starting background worker...")
+
+    # Properly run the async function immediately after deployment
+    asyncio.run(run_server_check())
+
+    # Schedule daily job at 7:30 AM PST
+    scheduler.add_job(
+        lambda: asyncio.run(run_server_check()),  # Ensures async runs properly
+        trigger="cron",
+        hour=7,
+        minute=30,
+        timezone="US/Pacific"
+    )
+
     scheduler.start()
