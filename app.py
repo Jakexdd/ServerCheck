@@ -17,7 +17,7 @@ asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 # ------------------ Configuration ------------------
 PANEL_URL = "https://panel.businessidentity.llc"
 API_KEY = "ptla_XjxL979xLjfkJ6mGhkukaNQu9qeCTg3YiE4uFrBOUpP"
-REQUEST_TIMEOUT = (10, 10)  # in seconds
+REQUEST_TIMEOUT = (5, 5)  # in seconds
 CONCURRENCY_LIMIT = 50      # Increase concurrency if resources allow
 BATCH_SIZE = 100            # Process servers in batches of 100
 PDF_RENDER_EXPORT_URL = "http://flask-outage-app:8080/upload"  # Use HTTP for internal service
@@ -54,7 +54,7 @@ async def async_check_ssl_handshake(hostname, timeout=20):
         logging.error(f"SSL handshake failed for {hostname}: {e}")
     return False
 
-async def async_get_with_retries(url, client, retries=5, delay=2):
+async def async_get_with_retries(url, client, retries=2, delay=2):
     """Perform GET request with retries using httpx and exponential backoff."""
     for attempt in range(1, retries + 1):
         try:
