@@ -2,6 +2,7 @@
 import os
 import sys
 import asyncio, aiohttp, requests, ssl, time, json, logging, datetime, pandas as pd, threading
+from flask import Flask, jsonify
 
 # Monkey-patch Werkzeug's url_quote if it's missing
 import werkzeug.urls
@@ -9,38 +10,49 @@ if not hasattr(werkzeug.urls, "url_quote"):
     from urllib.parse import quote
     werkzeug.urls.url_quote = quote
 
-from flask import Flask, jsonify
+# --- Logging Configuration ---
+# Log to both file and stdout so you can see logs in Render's dashboard.
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+console_formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+console_handler.setFormatter(console_formatter)
+logging.getLogger().addHandler(console_handler)
 
-# ------------------ Global Timing Data ------------------
-ssl_check_timings = {"handshake": [], "http": []}
-web_check_timings = []
-mail_check_timings = []
-
-# ------------------ Configuration & Constants ------------------
+# --- Configuration & Constants ---
 PANEL_URL = "https://panel.businessidentity.llc"
 API_KEY = "ptla_XjxL979xLjfkJ6mGhkukaNQu9qeCTg3YiE4uFrBOUpP"
-REQUEST_TIMEOUT = (10, 10)
-ASYNC_TOTAL_TIMEOUT = 10
-CONCURRENCY_LIMIT = 40
+# Increased timeout to accommodate slow responses
+REQUEST_TIMEOUT = 10  
+CONCURRENCY_LIMIT = 100  # Increase concurrency for faster processing
 
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
     "Accept": "application/json",
     "Content-Type": "application/json",
 }
+# Internal endpoint for PDF upload
+PDF_RENDER_EXPORT_URL = "https://flask-outage-app:8080/upload"
 
-# Endpoint to which the PDF report should be sent
-PDF_RENDER_EXPORT_URL = "https://flask-outage-app:8080/upload"  # MODIFY accordingly
+# --- Global Timing Data & Status ---
+ssl_check_timings = {"handshake": [], "http": []}
+web_check_timings = []
+mail_check_timings = {}
+# This dictionary will hold overall progress and results for /status endpoint.
+check_status = {
+    "running": False,
+    "result": None,
+    "excel_file": None,
+    "message": "",
+    "progress": "0/0 servers processed"
+}
 
-logging.basicConfig(
-    filename="server_check.log",
-    filemode="a",
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+# ------------------ Asynchronous Functions for SSL/HTTP Checks ------------------
 
-# ------------------ Asynchronous Functions ------------------
 async def async_check_ssl_handshake(hostname, timeout=10):
     start = time.monotonic()
     try:
@@ -56,7 +68,10 @@ async def async_check_ssl_handshake(hostname, timeout=10):
             pass
         return True
     except Exception as e:
-        logging.exception(f"Async SSL handshake error for {hostname}: {e}")
+        if "Name or service not known" in str(e):
+            logging.error(f"DNS resolution failed for {hostname}: {e}")
+        else:
+            logging.exception(f"Async SSL handshake error for {hostname}: {e}")
         return False
     finally:
         elapsed = time.monotonic() - start
@@ -77,8 +92,7 @@ async def async_check_ssl_http(hostname, timeout=10, session=None):
         logging.exception(f"Async HTTP SSL check error for {hostname}: {e}")
         return False
     finally:
-        elapsed = time.monotonic() - start
-        ssl_check_timings["http"].append(elapsed)
+        ssl_check_timings["http"].append(time.monotonic() - start)
 
 async def async_check_ssl_certificate(hostname, retries=3, delay=1, timeout=10, session=None):
     for _ in range(retries):
@@ -86,8 +100,8 @@ async def async_check_ssl_certificate(hostname, retries=3, delay=1, timeout=10, 
             async_check_ssl_handshake(hostname, timeout),
             async_check_ssl_http(hostname, timeout, session)
         ]
-        results = await asyncio.gather(*tasks)
-        if any(results):
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        if any(result is True for result in results):
             return True
         await asyncio.sleep(delay)
     return False
@@ -115,10 +129,12 @@ async def timed_async_get_with_retries(url, session, retries=3, delay=1, ssl_opt
         mail_check_timings.append(elapsed)
     return result
 
-async def check_server_async(server, session, node_map, pause_event=None):
-    server_name = server["attributes"]["name"]
-    server_uuid = server["attributes"]["uuid"]
-    node_id = server["attributes"]["node"]
+# ------------------ Asynchronous Function to Check a Single Server ------------------
+
+async def check_server_async(server, session, node_map):
+    server_name = server["attributes"].get("name", "Unknown")
+    server_uuid = server["attributes"].get("uuid", "Unknown")
+    node_id = server["attributes"].get("node")
     node_name = node_map.get(node_id, f"Node {node_id}")
     external_identifier = server["attributes"].get("external_id")
     if not external_identifier:
@@ -126,15 +142,15 @@ async def check_server_async(server, session, node_map, pause_event=None):
     server_url = f"https://{external_identifier}"
     mail_url = f"https://mail.{external_identifier}"
     is_up_status, mail_status = await asyncio.gather(
-        timed_async_get_with_retries(server_url, session, retries=3, delay=1, ssl_option=False, label="web"),
-        timed_async_get_with_retries(mail_url, session, retries=3, delay=1, ssl_option=False, label="mail")
+        timed_async_get_with_retries(server_url, session, label="web"),
+        timed_async_get_with_retries(mail_url, session, label="mail")
     )
     is_up = is_up_status is not None
     mail_up = mail_status is not None
     try:
         ssl_results = await asyncio.gather(
-            async_check_ssl_certificate(external_identifier, retries=3, delay=1, timeout=10, session=session),
-            async_check_ssl_certificate("mail." + external_identifier, retries=3, delay=1, timeout=10, session=session)
+            async_check_ssl_certificate(external_identifier, session=session),
+            async_check_ssl_certificate("mail." + external_identifier, session=session)
         )
         ssl_valid = ssl_results[0] or ssl_results[1]
     except Exception as e:
@@ -142,75 +158,84 @@ async def check_server_async(server, session, node_map, pause_event=None):
         ssl_valid = False
     return (server_uuid, node_name, server_name, is_up, mail_up, ssl_valid)
 
-# ------------------ Synchronous Functions for Server Check ------------------
-def get_all_servers():
-    logging.info("Fetching full server list from API...")
-    servers = []
-    page = 1
-    try:
-        while True:
-            url = f"{PANEL_URL}/api/application/servers?page={page}&per_page=1000"
-            response = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            if response.status_code != 200:
-                logging.error(f"API Error: {response.status_code}")
-                break
-            data = response.json()
-            page_servers = data.get("data", [])
-            if not page_servers:
-                break
-            servers.extend(page_servers)
-            logging.info(f"Retrieved {len(servers)} servers so far...")
-            page += 1
-        return servers
-    except Exception as e:
-        logging.exception(f"Error fetching servers: {e}")
-        return servers
+# ------------------ Asynchronous Functions to Fetch Nodes and Servers ------------------
 
-def get_all_nodes():
-    logging.info("Fetching nodes list...")
+async def fetch_all_nodes(session):
     nodes = []
     page = 1
-    try:
-        while True:
-            url = f"{PANEL_URL}/api/application/nodes?page={page}"
-            response = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            if response.status_code != 200:
-                logging.error(f"API Error fetching nodes: {response.status_code}")
-                break
-            data = response.json()
-            page_nodes = data.get("data", [])
-            if not page_nodes:
-                break
-            nodes.extend(page_nodes)
-            logging.info(f"Retrieved {len(nodes)} nodes so far...")
-            page += 1
-        logging.info(f"Total nodes fetched: {len(nodes)}")
-        node_map = {}
-        for node in nodes:
-            attributes = node.get("attributes", {})
-            nid = attributes.get("id")
-            name = attributes.get("name")
-            if nid is not None and name is not None:
-                node_map[nid] = name
-        return node_map
-    except Exception as e:
-        logging.exception(f"Error fetching nodes: {e}")
-        return {}
+    while True:
+        url = f"{PANEL_URL}/api/application/nodes?page={page}"
+        try:
+            async with session.get(url, headers=HEADERS) as response:
+                if response.status != 200:
+                    logging.error(f"API Error fetching nodes: {response.status}")
+                    break
+                data = await response.json()
+                page_nodes = data.get("data", [])
+                if not page_nodes:
+                    break
+                nodes.extend(page_nodes)
+                logging.info(f"Retrieved {len(nodes)} nodes so far...")
+                page += 1
+        except Exception as e:
+            logging.exception(f"Error fetching nodes: {e}")
+            break
+    logging.info(f"Total nodes fetched: {len(nodes)}")
+    node_map = {node["attributes"]["id"]: node["attributes"]["name"]
+                for node in nodes if node["attributes"].get("id") and node["attributes"].get("name")}
+    return node_map
 
-async def process_all_checks(servers, node_map):
-    results = []
-    sem = asyncio.Semaphore(CONCURRENCY_LIMIT)
-    timeout = aiohttp.ClientTimeout(total=ASYNC_TOTAL_TIMEOUT)
-    connector = aiohttp.TCPConnector(limit=0)
-    async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
-        async def sem_task(server):
-            async with sem:
-                return await check_server_async(server, session, node_map)
-        tasks = [asyncio.create_task(sem_task(s)) for s in servers]
+async def fetch_all_servers(session):
+    servers = []
+    page = 1
+    while True:
+        url = f"{PANEL_URL}/api/application/servers?page={page}&per_page=1000"
+        try:
+            async with session.get(url, headers=HEADERS) as response:
+                if response.status != 200:
+                    logging.error(f"API Error fetching servers: {response.status}")
+                    break
+                data = await response.json()
+                page_servers = data.get("data", [])
+                if not page_servers:
+                    break
+                servers.extend(page_servers)
+                logging.info(f"Retrieved {len(servers)} servers so far...")
+                page += 1
+        except Exception as e:
+            logging.exception(f"Error fetching servers: {e}")
+            break
+    return servers
+
+# ------------------ Main Async Routine for Running Server Checks ------------------
+
+async def run_server_checks():
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)) as session:
+        node_map = await fetch_all_nodes(session)
+        servers = await fetch_all_servers(session)
+        valid_ids = {str(k) for k in node_map.keys()}
+        filtered_servers = [s for s in servers if str(s["attributes"].get("node")) in valid_ids]
+        total_servers = len(filtered_servers)
+        logging.info(f"Total servers to check: {total_servers}")
+        # Store total count in global status for progress reporting
+        check_status["progress"] = f"0/{total_servers} servers processed"
+        semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
+        tasks = [asyncio.create_task(check_server_async(s, session, node_map))
+                 for s in filtered_servers]
+        results = []
+        progress = 0
         for task in asyncio.as_completed(tasks):
-            result = await task
-            results.append(result)
-    return results
+            try:
+                res = await task
+                results.append(res)
+            except Exception as e:
+                logging.exception("Task failed: " + str(e))
+            progress += 1
+            logging.info(f"Progress: {progress}/{total_servers} servers processed")
+            check_status["progress"] = f"{progress}/{total_servers} servers processed"
+        return results
+
+# ------------------ Functions for Exporting and Analyzing Results ------------------
 
 def export_results_to_excel(server_status):
     try:
@@ -234,29 +259,21 @@ def export_results_to_excel(server_status):
         logging.info(f"Results exported to {filename}")
         return filename
     except Exception as e:
-        logging.exception("Error exporting to Excel")
+        logging.exception("Error exporting to Excel: " + str(e))
         return None
 
-# ------------------ Analyzer Functions ------------------
 def analyze_excel_and_generate_pdf(excel_filename):
-    """
-    Loads the Excel file produced by the server check,
-    computes statistics and generates charts,
-    then builds a PDF report (using ReportLab) and returns its filename.
-    """
     try:
         df = pd.read_excel(excel_filename)
     except Exception as e:
         logging.exception("Error reading Excel file: " + str(e))
         return None
 
-    # Ensure required columns exist
     for col in ["Node Name", "Web Status", "Mail Status", "SSL"]:
         if col not in df.columns:
             logging.error(f"Missing required column: {col}")
             return None
 
-    # Get the "Checked At" value if present
     checked_at = None
     if "Checked At" in df.columns:
         try:
@@ -264,7 +281,6 @@ def analyze_excel_and_generate_pdf(excel_filename):
         except Exception:
             checked_at = None
 
-    # Overall stats
     total_servers = len(df)
     web_up = (df["Web Status"].str.upper() == "UP").sum()
     web_down = (df["Web Status"].str.upper() == "DOWN").sum()
@@ -273,7 +289,6 @@ def analyze_excel_and_generate_pdf(excel_filename):
     ssl_yes = (df["SSL"].str.upper() == "YES").sum()
     ssl_no = (df["SSL"].str.upper() == "NO").sum()
 
-    # Group by "Node Name" for breakdown
     node_group = df.groupby("Node Name").agg(
         Web_Up=('Web Status', lambda x: (x.str.upper() == "UP").sum()),
         Web_Down=('Web Status', lambda x: (x.str.upper() == "DOWN").sum()),
@@ -303,7 +318,6 @@ def analyze_excel_and_generate_pdf(excel_filename):
         f"Most Stable Node: {most_stable_node}"
     )
 
-    # Compute extra percentages
     web_up_pct = (web_up / (web_up + web_down) * 100) if (web_up + web_down) > 0 else 0
     web_down_pct = (web_down / (web_up + web_down) * 100) if (web_up + web_down) > 0 else 0
     mail_up_pct = (mail_up / (mail_up + mail_down) * 100) if (mail_up + mail_down) > 0 else 0
@@ -317,11 +331,10 @@ def analyze_excel_and_generate_pdf(excel_filename):
         f"SSL Server Stats:\nEnabled: {ssl_yes} ({ssl_yes_pct:.1f}%)\nDisabled: {ssl_no} ({ssl_no_pct:.1f}%)"
     )
 
-    # Generate charts in headless mode
     import matplotlib.pyplot as plt
     plt.style.use('dark_background')
 
-    # Bar Chart
+    # --- Generate Bar Chart ---
     plt.figure(figsize=(14, 7))
     index = range(len(node_group))
     bar_width = 0.35
@@ -343,18 +356,15 @@ def analyze_excel_and_generate_pdf(excel_filename):
     plt.savefig(bar_chart_path)
     plt.close()
 
-    # Pie Charts
+    # --- Generate Pie Charts ---
     fig, axs = plt.subplots(1, 3, figsize=(21, 7))
     plt.subplots_adjust(wspace=0.4, left=0.1, right=0.9, top=0.95, bottom=0.1)
-    # Web status
     axs[0].pie([web_up, web_down], labels=['Up', 'Down'], autopct='%1.1f%%', startangle=90,
                colors=['#8BC34A', '#F44336'], shadow=True)
     axs[0].set_title("Web Server Status", fontsize=12, pad=20, color='white')
-    # Mail status
     axs[1].pie([mail_up, mail_down], labels=['Up', 'Down'], autopct='%1.1f%%', startangle=90,
                colors=['#8BC34A', '#F44336'], shadow=True)
     axs[1].set_title("Mail Server Status", fontsize=12, pad=20, color='white')
-    # SSL status
     axs[2].pie([ssl_yes, ssl_no], labels=['Enabled', 'Disabled'], autopct='%1.1f%%', startangle=90,
                colors=['#8BC34A', '#F44336'], shadow=True)
     axs[2].set_title("SSL Server Status", fontsize=12, pad=20, color='white')
@@ -362,7 +372,6 @@ def analyze_excel_and_generate_pdf(excel_filename):
     plt.savefig(pie_chart_path)
     plt.close()
 
-    # Build PDF report using ReportLab
     from reportlab.lib.pagesizes import letter
     from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, LongTable, Table, TableStyle, KeepTogether
     from reportlab.lib.styles import getSampleStyleSheet
@@ -396,9 +405,8 @@ def analyze_excel_and_generate_pdf(excel_filename):
         ]))
         flowables.append(summary_table)
         flowables.append(Spacer(1, 12))
-        # Convert node_group to table data
-        data = [node_group.columns.tolist()] + node_group.values.tolist()
-        node_table = LongTable(data, repeatRows=1)
+        data_table = [node_group.columns.tolist()] + node_group.values.tolist()
+        node_table = LongTable(data_table, repeatRows=1)
         node_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
@@ -443,19 +451,17 @@ def export_pdf_file_to_remote(pdf_filename):
         logging.exception("Error exporting PDF file to remote server.")
 
 # ------------------ Main Server Check Routine ------------------
+
 def run_server_check():
     logging.info("Starting server check.")
-    node_map = get_all_nodes()
-    servers = get_all_servers()
-    valid_ids = {str(k) for k in node_map.keys()}
-    filtered_servers = [s for s in servers if str(s["attributes"].get("node")) in valid_ids]
-    logging.info(f"Total servers to check: {len(filtered_servers)}")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    results = loop.run_until_complete(process_all_checks(filtered_servers, node_map))
+    results = loop.run_until_complete(run_server_checks())
     loop.close()
     server_status = {}
     for res in results:
+        if isinstance(res, Exception):
+            continue
         uuid, node_name, server_name, is_up, mail_up, ssl_valid = res
         server_status[uuid] = {
             "server_name": server_name,
@@ -466,20 +472,14 @@ def run_server_check():
         }
     excel_filename = export_results_to_excel(server_status)
     if excel_filename:
-        # Analyze the Excel file to generate a PDF report and upload that PDF
         pdf_filename = analyze_excel_and_generate_pdf(excel_filename)
         if pdf_filename:
             export_pdf_file_to_remote(pdf_filename)
     return server_status, excel_filename
 
-# ------------------ Flask Application ------------------
+# ------------------ Flask Application Setup ------------------
+
 app = Flask(__name__)
-check_status = {
-    "running": False,
-    "result": None,
-    "excel_file": None,
-    "message": ""
-}
 
 @app.route("/")
 def index():
@@ -504,7 +504,7 @@ def background_check():
         check_status["running"] = False
 
 if __name__ == "__main__":
-    # Start the background check in a separate thread before starting the Flask server.
+    # Start the background check in a separate thread before launching the Flask server.
     thread = threading.Thread(target=background_check)
     thread.start()
     app.run(host="0.0.0.0", port=5000)
