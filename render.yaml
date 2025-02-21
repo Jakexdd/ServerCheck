@@ -1,0 +1,7 @@
+services:
+  - type: worker
+    name: server-check-worker
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
+    schedule: "30 15 * * *"  # 7:30 AM PST (Render uses UTC, so 7:30 AM PST = 3:30 PM UTC)
