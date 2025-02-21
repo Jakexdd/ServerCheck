@@ -11,7 +11,7 @@ if not hasattr(werkzeug.urls, "url_quote"):
     werkzeug.urls.url_quote = quote
 
 # --- Logging Configuration ---
-# Log to both file and stdout so you can see logs in Render's dashboard.
+# Log to both file and stdout so logs appear in Render's dashboard.
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -26,9 +26,8 @@ logging.getLogger().addHandler(console_handler)
 # --- Configuration & Constants ---
 PANEL_URL = "https://panel.businessidentity.llc"
 API_KEY = "ptla_XjxL979xLjfkJ6mGhkukaNQu9qeCTg3YiE4uFrBOUpP"
-# Increased timeout to accommodate slow responses
-REQUEST_TIMEOUT = 10  
-CONCURRENCY_LIMIT = 100  # Increase concurrency for faster processing
+REQUEST_TIMEOUT = 10  # increased timeout (in seconds)
+CONCURRENCY_LIMIT = 100  # increased concurrency
 
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",
@@ -41,8 +40,7 @@ PDF_RENDER_EXPORT_URL = "https://flask-outage-app:8080/upload"
 # --- Global Timing Data & Status ---
 ssl_check_timings = {"handshake": [], "http": []}
 web_check_timings = []
-mail_check_timings = {}
-# This dictionary will hold overall progress and results for /status endpoint.
+mail_check_timings = []
 check_status = {
     "running": False,
     "result": None,
@@ -92,7 +90,8 @@ async def async_check_ssl_http(hostname, timeout=10, session=None):
         logging.exception(f"Async HTTP SSL check error for {hostname}: {e}")
         return False
     finally:
-        ssl_check_timings["http"].append(time.monotonic() - start)
+        elapsed = time.monotonic() - start
+        ssl_check_timings["http"].append(elapsed)
 
 async def async_check_ssl_certificate(hostname, retries=3, delay=1, timeout=10, session=None):
     for _ in range(retries):
@@ -106,6 +105,7 @@ async def async_check_ssl_certificate(hostname, retries=3, delay=1, timeout=10, 
         await asyncio.sleep(delay)
     return False
 
+# Updated function to handle TimeoutError
 async def async_get_with_retries(url, session, retries=3, delay=1, ssl_option=False):
     for attempt in range(retries):
         try:
@@ -114,6 +114,8 @@ async def async_get_with_retries(url, session, retries=3, delay=1, ssl_option=Fa
                     return resp.status
                 else:
                     logging.warning(f"Attempt {attempt+1}: {url} returned status {resp.status}")
+        except asyncio.TimeoutError as te:
+            logging.error(f"Timeout on attempt {attempt+1} fetching {url}: {te}")
         except Exception as e:
             logging.exception(f"Attempt {attempt+1}: Error fetching {url}: {e}")
         await asyncio.sleep(delay)
@@ -217,11 +219,9 @@ async def run_server_checks():
         filtered_servers = [s for s in servers if str(s["attributes"].get("node")) in valid_ids]
         total_servers = len(filtered_servers)
         logging.info(f"Total servers to check: {total_servers}")
-        # Store total count in global status for progress reporting
         check_status["progress"] = f"0/{total_servers} servers processed"
         semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-        tasks = [asyncio.create_task(check_server_async(s, session, node_map))
-                 for s in filtered_servers]
+        tasks = [asyncio.create_task(check_server_async(s, session, node_map)) for s in filtered_servers]
         results = []
         progress = 0
         for task in asyncio.as_completed(tasks):
@@ -334,7 +334,7 @@ def analyze_excel_and_generate_pdf(excel_filename):
     import matplotlib.pyplot as plt
     plt.style.use('dark_background')
 
-    # --- Generate Bar Chart ---
+    # Generate Bar Chart
     plt.figure(figsize=(14, 7))
     index = range(len(node_group))
     bar_width = 0.35
@@ -356,7 +356,7 @@ def analyze_excel_and_generate_pdf(excel_filename):
     plt.savefig(bar_chart_path)
     plt.close()
 
-    # --- Generate Pie Charts ---
+    # Generate Pie Charts
     fig, axs = plt.subplots(1, 3, figsize=(21, 7))
     plt.subplots_adjust(wspace=0.4, left=0.1, right=0.9, top=0.95, bottom=0.1)
     axs[0].pie([web_up, web_down], labels=['Up', 'Down'], autopct='%1.1f%%', startangle=90,
@@ -504,7 +504,7 @@ def background_check():
         check_status["running"] = False
 
 if __name__ == "__main__":
-    # Start the background check in a separate thread before launching the Flask server.
+    # Start the background check in a separate thread before launching Flask.
     thread = threading.Thread(target=background_check)
     thread.start()
     app.run(host="0.0.0.0", port=5000)
