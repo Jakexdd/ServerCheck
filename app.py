@@ -8,13 +8,14 @@ import aiohttp
 import ssl
 import os
 import time
-import asyncio
+import gc
 
 # ------------------ Configuration ------------------
 PANEL_URL = "https://panel.businessidentity.llc"
 API_KEY = "ptla_XjxL979xLjfkJ6mGhkukaNQu9qeCTg3YiE4uFrBOUpP"
 REQUEST_TIMEOUT = (10, 10)
-CONCURRENCY_LIMIT = 10
+CONCURRENCY_LIMIT = 10  # Optimized for 512MB memory
+BATCH_SIZE = 100  # Process servers in batches of 100
 PDF_RENDER_EXPORT_URL = "https://flask-outage-app:8080/upload"
 
 # ------------------ Logging Setup ------------------
@@ -145,13 +146,14 @@ def upload_report_to_pdf_service(excel_file):
     except Exception as e:
         logging.error(f"Failed to upload report: {e}")
 
-# ------------------ Main Task Runner ------------------
-async def run_server_check():
-    """Main server check task."""
-    logging.info("Starting full server check...")
-    node_map = get_all_nodes()
-    servers = get_all_servers()
+# ------------------ Batch Processing ------------------
+def batch_servers(servers, batch_size=BATCH_SIZE):
+    """Yield successive batches from a list of servers."""
+    for i in range(0, len(servers), batch_size):
+        yield servers[i:i + batch_size]
 
+async def process_server_batch(servers, node_map):
+    """Process a batch of servers asynchronously."""
     results = []
     connector = aiohttp.TCPConnector(limit=CONCURRENCY_LIMIT)
     timeout = aiohttp.ClientTimeout(total=30)
@@ -161,8 +163,25 @@ async def run_server_check():
         for future in asyncio.as_completed(tasks):
             result = await future
             results.append(result)
+    return results
 
-    report_file = generate_report(results)
+# ------------------ Main Task Runner ------------------
+async def run_server_check():
+    """Main server check task with batch processing."""
+    logging.info("Starting full server check...")
+    node_map = get_all_nodes()
+    servers = get_all_servers()
+
+    all_results = []
+    for batch_num, server_batch in enumerate(batch_servers(servers), start=1):
+        logging.info(f"Processing batch {batch_num} with {len(server_batch)} servers...")
+        batch_results = await process_server_batch(server_batch, node_map)
+        all_results.extend(batch_results)
+
+        # Clean up memory after each batch
+        gc.collect()
+
+    report_file = generate_report(all_results)
     upload_report_to_pdf_service(report_file)
     logging.info("Server check completed successfully.")
 
@@ -173,18 +192,15 @@ scheduler = BlockingScheduler()
 scheduler.add_job(lambda: asyncio.run(run_server_check()), 'cron', hour=15, minute=30, timezone='UTC')
 
 # ------------------ Entry Point ------------------
-import asyncio
-
-# ✅ Corrected main execution block for async execution
 if __name__ == "__main__":
     logging.info("Starting background worker...")
 
-    # Properly run the async function immediately after deployment
+    # Run the check once on deployment
     asyncio.run(run_server_check())
 
     # Schedule daily job at 7:30 AM PST
     scheduler.add_job(
-        lambda: asyncio.run(run_server_check()),  # Ensures async runs properly
+        lambda: asyncio.run(run_server_check()),
         trigger="cron",
         hour=7,
         minute=30,
