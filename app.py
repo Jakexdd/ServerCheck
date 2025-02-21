@@ -19,7 +19,7 @@ PANEL_URL = "https://panel.businessidentity.llc"
 API_KEY = "ptla_XjxL979xLjfkJ6mGhkukaNQu9qeCTg3YiE4uFrBOUpP"
 REQUEST_TIMEOUT = (7, 7)  # in seconds
 CONCURRENCY_LIMIT = 50      # Increase concurrency if resources allow
-BATCH_SIZE = 1000            # Process servers in batches of 100
+BATCH_SIZE = 500            # Process servers in batches of 100
 PDF_RENDER_EXPORT_URL = "http://flask-outage-app:8080/upload"  # Use HTTP for internal service
 
 # ------------------ Logging Setup ------------------
