@@ -13,7 +13,7 @@ import time
 PANEL_URL = "https://panel.businessidentity.llc"
 API_KEY = "ptla_XjxL979xLjfkJ6mGhkukaNQu9qeCTg3YiE4uFrBOUpP"
 REQUEST_TIMEOUT = (3, 3)
-CONCURRENCY_LIMIT = 40
+CONCURRENCY_LIMIT = 20
 PDF_RENDER_EXPORT_URL = "https://flask-outage-app:8080/upload"
 
 # ------------------ Logging Setup ------------------
